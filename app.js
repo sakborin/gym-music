@@ -1,9 +1,15 @@
 const $ = (id) => document.getElementById(id);
-const player = $('player'), list = $('list'), now = $('now'), seek = $('seek');
+const player = $('player'), remote = $('remote'), list = $('list'), now = $('now'), seek = $('seek');
 const playBtn = $('play'), statusEl = $('status'), emptyMsg = $('empty');
 const SILENCE = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
 
-// Icons (drawn with SVG, no emoji)
+// Relay servers: they connect the two phones when cellular networks block direct links
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  // PASTE YOUR METERED ENTRIES HERE
+];
+const PEER_OPTIONS = { config: { iceServers: ICE_SERVERS } };
+
 const ICON = {
   play: '<svg viewBox="0 0 24 24" class="size-7" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
   pause: '<svg viewBox="0 0 24 24" class="size-7" fill="currentColor"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>',
@@ -13,7 +19,8 @@ const ICON = {
 };
 
 let songs = [], index = -1, shuffle = false, loopMode = 0; // loop: 0 off, 1 all, 2 one
-let peer = null, conn = null, isHost = false, pending = null;
+let peer = null, conn = null, isHost = false;
+let ctx = null, delayNode = null, streamDest = null, delayMs = 0;
 
 // ---------- Storage (stays on this phone) ----------
 function openDB() {
@@ -62,41 +69,39 @@ async function refresh() {
       if (i === index) { player.pause(); now.textContent = 'Nothing playing'; index = -1; }
       refresh();
     };
-    li.onclick = () => playSong(i);
+    li.onclick = () => playLocal(i);
     li.append(name, del);
     list.appendChild(li);
   });
 }
 
-// ---------- Playback ----------
+// ---------- Playback (host) ----------
 function playLocal(i) {
   if (!songs[i]) return;
   index = i;
   if (player.dataset.url) URL.revokeObjectURL(player.dataset.url);
   player.dataset.url = URL.createObjectURL(songs[i].blob);
   player.src = player.dataset.url;
+  if (ctx) ctx.resume();
   player.play();
   now.textContent = title(songs[i]);
+  send({ t: 'now', title: title(songs[i]) });
   if ('mediaSession' in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: title(songs[i]), artist: 'Gym Music' });
   refresh();
 }
-function playSong(i) {           // you chose a song: play it here and tell your friend
-  playLocal(i);
-  send({ t: 'play', name: songs[i].name });
-}
 function next() {
   if (!songs.length) return;
-  playSong(shuffle ? Math.floor(Math.random() * songs.length) : (index + 1) % songs.length);
+  playLocal(shuffle ? Math.floor(Math.random() * songs.length) : (index + 1) % songs.length);
 }
 function prev() {
   if (!songs.length) return;
-  if (player.currentTime > 3) { player.currentTime = 0; send({ t: 'seek', time: 0 }); return; }
-  playSong((index - 1 + songs.length) % songs.length);
+  if (player.currentTime > 3) { player.currentTime = 0; return; }
+  playLocal((index - 1 + songs.length) % songs.length);
 }
 function toggle() {
-  if (index < 0) return playSong(0);
-  if (player.paused) { player.play(); send({ t: 'resume', time: player.currentTime }); }
-  else { player.pause(); send({ t: 'pause', time: player.currentTime }); }
+  if (index < 0) return playLocal(0);
+  if (ctx) ctx.resume();
+  player.paused ? player.play() : player.pause();
 }
 const fmt = (s) => isFinite(s) ? Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0') : '0:00';
 
@@ -110,11 +115,9 @@ player.ontimeupdate = () => {
 player.onended = () => {
   if (index < 0) return;
   if (loopMode === 2) { player.currentTime = 0; player.play(); return; }
-  if (conn && !isHost) return;   // when connected, only the host picks the next song
   if (loopMode === 1 || shuffle || index < songs.length - 1) next();
 };
 seek.oninput = () => { if (player.duration) player.currentTime = (seek.value / 100) * player.duration; };
-seek.onchange = () => send({ t: 'seek', time: player.currentTime });
 
 function setActive(btn, on) {
   btn.classList.toggle('text-[#6f8dff]', on);
@@ -127,9 +130,15 @@ $('loop').onclick = (e) => {
   e.currentTarget.innerHTML = loopMode === 2 ? ICON.loopOne : ICON.loop;
   setActive(e.currentTarget, loopMode > 0);
 };
-// Fine-tune if your earphones are slower or faster than your friend's
-$('ahead').onclick = () => { player.currentTime += 0.05; };
-$('back').onclick = () => { player.currentTime = Math.max(0, player.currentTime - 0.05); };
+
+// Delay only YOUR sound, so it lines up with your friend's (who gets the stream a bit later)
+function setDelay(ms) {
+  delayMs = Math.max(0, Math.min(1000, ms));
+  if (delayNode) delayNode.delayTime.value = delayMs / 1000;
+  $('delayval').textContent = delayMs + ' ms';
+}
+$('more').onclick = () => setDelay(delayMs + 50);
+$('less').onclick = () => setDelay(delayMs - 50);
 
 if ('mediaSession' in navigator) {
   navigator.mediaSession.setActionHandler('play', toggle);
@@ -142,54 +151,64 @@ if ('mediaSession' in navigator) {
 const setStatus = (t) => { statusEl.textContent = t; };
 function send(msg) { if (conn && conn.open) conn.send(msg); }
 
-async function onMessage(m) {
-  if (m.t === 'play') {
-    const i = songs.findIndex((s) => s.name === m.name);
-    if (i >= 0) playLocal(i);
-    else { pending = m.name; setStatus('Receiving “' + m.name + '” from your friend...'); send({ t: 'need', name: m.name }); }
-  } else if (m.t === 'need') {
-    const s = songs.find((x) => x.name === m.name);
-    if (s) send({ t: 'file', name: s.name, type: s.blob.type, data: await s.blob.arrayBuffer() });
-  } else if (m.t === 'file') {
-    await saveSong(new File([m.data], m.name, { type: m.type || 'audio/mpeg' }));
-    await refresh();
-    if (pending === m.name) {
-      pending = null;
-      playLocal(songs.findIndex((s) => s.name === m.name));
-      setStatus('Connected');
-      send({ t: 'sync' });       // ask where the other phone is in the song
-    }
-  } else if (m.t === 'sync') {
-    send({ t: 'seek', time: player.currentTime });
-  } else if (m.t === 'pause') {
-    player.pause(); player.currentTime = m.time;
-  } else if (m.t === 'resume') {
-    player.currentTime = m.time; player.play();
-  } else if (m.t === 'seek') {
-    player.currentTime = m.time;
-  }
+function setGuestMode(on) {
+  $('addlabel').classList.toggle('hidden', on);
+  $('library').classList.toggle('hidden', on);
+  $('hostctl').classList.toggle('hidden', on);
+  $('guestmsg').classList.toggle('hidden', !on);
+  if (on) now.textContent = 'Waiting for your friend to play something';
+}
+
+// Host: route the player through Web Audio so we can both hear it and stream it
+function setupHostAudio() {
+  if (ctx) { ctx.resume(); return; }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  ctx = new AC();
+  const source = ctx.createMediaElementSource(player);
+  delayNode = ctx.createDelay(1.0);
+  delayNode.delayTime.value = delayMs / 1000;
+  streamDest = ctx.createMediaStreamDestination();
+  source.connect(delayNode);
+  delayNode.connect(ctx.destination);   // what you hear (delayed)
+  source.connect(streamDest);           // what your friend hears (live)
+  ctx.resume();
 }
 
 function wire(c) {
   conn = c;
-  const ready = () => setStatus('Connected. Pick a song and play.');
+  const ready = () => {
+    if (isHost) {
+      setStatus('Friend connected. Pick a song and play.');
+      if (index >= 0) send({ t: 'now', title: title(songs[index]) });
+      const call = peer.call(c.peer, streamDest.stream);
+      call.on('error', (e) => setStatus('Audio error: ' + e));
+    } else {
+      setStatus('Connected. Waiting for audio...');
+      setGuestMode(true);
+    }
+  };
   if (c.open) ready(); else c.on('open', ready);
-  c.on('data', onMessage);
-  c.on('close', () => { conn = null; setStatus('Friend disconnected.'); });
+  c.on('data', (m) => { if (m.t === 'now') now.textContent = m.title; });
+  c.on('close', () => {
+    conn = null;
+    setStatus(isHost ? 'Friend disconnected.' : 'Host left the session.');
+    if (!isHost) setGuestMode(false);
+  });
 }
 
 // iOS only allows sound after a tap, so unlock audio when the person taps Start/Join
-function unlock() {
-  player.src = SILENCE;
-  player.play().then(() => player.pause()).catch(() => {});
+function unlock(el) {
+  el.src = SILENCE;
+  el.play().then(() => el.pause()).catch(() => {});
 }
 
 $('start').onclick = () => {
-  unlock();
+  setupHostAudio();
+  unlock(player);
   if (peer) peer.destroy();
   isHost = true;
   const code = String(Math.floor(1000 + Math.random() * 9000));
-  peer = new Peer('gymmusic-' + code);
+  peer = new Peer('gymmusic-' + code, PEER_OPTIONS);
   peer.on('open', () => setStatus('Your code is ' + code + '. Tell your friend to join.'));
   peer.on('connection', wire);
   peer.on('error', (e) => setStatus('Error: ' + e.type + '. Tap Start session to try again.'));
@@ -198,12 +217,28 @@ $('start').onclick = () => {
 $('join').onclick = () => {
   const code = $('code').value.trim();
   if (code.length !== 4) return setStatus('Enter the 4-digit code first.');
-  unlock();
+  unlock(remote);
   if (peer) peer.destroy();
   isHost = false;
   setStatus('Connecting...');
-  peer = new Peer();
-  peer.on('open', () => wire(peer.connect('gymmusic-' + code, { reliable: true })));
+  peer = new Peer(undefined, PEER_OPTIONS);
+  peer.on('open', () => {
+    wire(peer.connect('gymmusic-' + code, { reliable: true }));
+    setTimeout(() => {
+      if (!conn || !conn.open) setStatus('Still not connected. Ask your friend to tap Start session again for a new code.');
+    }, 15000);
+  });
+  // The host calls us with the live audio
+  peer.on('call', (call) => {
+    call.answer();
+    call.on('stream', (stream) => {
+      remote.srcObject = stream;
+      remote.play().then(() => setStatus('Listening')).catch(() => {
+        setStatus('Tap anywhere on the screen to start the sound.');
+        document.body.addEventListener('click', () => remote.play(), { once: true });
+      });
+    });
+  });
   peer.on('error', (e) => setStatus('Error: ' + e.type + '. Check the code and try again.'));
 };
 

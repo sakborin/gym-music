@@ -22,6 +22,10 @@
   <section class="mx-auto mb-3 max-w-lg px-5">
     <div class="rounded-2xl border border-[#2b313b] bg-[#1e232b] p-4">
       <p class="mb-3 text-sm font-semibold">Listen together</p>
+
+      <input id="name" maxlength="16" placeholder="Your name (shown to the host)"
+        class="mb-2 w-full rounded-xl border border-[#2b313b] bg-[#15181e] px-3 py-2.5 text-sm outline-none focus:border-[#6f8dff]">
+
       <div class="flex gap-2">
         <button id="start" class="flex-1 rounded-xl bg-[#6f8dff] py-2.5 text-sm font-semibold text-white">Start session</button>
         <input id="code" inputmode="numeric" maxlength="4" placeholder="Code"
@@ -29,6 +33,14 @@
         <button id="join" class="rounded-xl border border-[#6f8dff] px-4 py-2.5 text-sm font-semibold text-[#6f8dff]">Join</button>
       </div>
       <p id="status" class="mt-3 text-sm text-[#8d96a3]">Not connected</p>
+      <button id="leave" class="mt-3 hidden w-full rounded-xl border border-red-400 py-2.5 text-sm font-semibold text-red-400">Leave session</button>
+      <button id="end" class="mt-3 hidden w-full rounded-xl border border-red-400 py-2.5 text-sm font-semibold text-red-400">End session</button>
+
+      <div id="listeners" class="mt-3 hidden border-t border-[#2b313b] pt-3">
+        <p id="lcount" class="text-sm font-semibold">0 listening</p>
+        <ul id="lnames" class="mt-2 space-y-1 text-sm"></ul>
+        <p id="lactivity" class="mt-2 text-xs text-[#8d96a3]"></p>
+      </div>
     </div>
   </section>
 

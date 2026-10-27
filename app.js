@@ -42,6 +42,9 @@ const ICON = {
 let songs = [], index = -1, shuffle = false, loopMode = 0; // loop: 0 off, 1 all, 2 one
 let peer = null, conn = null, isHost = false;
 let ctx = null, delayNode = null, streamDest = null, delayMs = 0;
+let guests = new Map();            // host only: everyone listening right now
+let sessionCode = '', lastEvent = '', pingTimer = null, watchTimer = null;
+let leftByMe = false, hostEnded = false;
 
 // ---------- Storage (stays on this phone) ----------
 function openDB() {
@@ -170,13 +173,64 @@ if ('mediaSession' in navigator) {
 
 // ---------- Listen together ----------
 const setStatus = (t) => { statusEl.textContent = t; };
-function send(msg) { if (conn && conn.open) conn.send(msg); }
+function send(msg) {
+  if (isHost) guests.forEach((g) => { if (g.conn.open) g.conn.send(msg); });
+  else if (conn && conn.open) conn.send(msg);
+}
+
+// ---------- Who is listening (host) ----------
+const clock = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+function myName() {
+  const n = $('name').value.trim().slice(0, 16) || 'Guest';
+  try { localStorage.setItem('gym-name', n); } catch (e) {}
+  return n;
+}
+try { $('name').value = localStorage.getItem('gym-name') || ''; } catch (e) {}
+
+function renderListeners() {
+  $('listeners').classList.remove('hidden');
+  $('end').classList.remove('hidden');
+  $('lcount').textContent = guests.size === 1 ? '1 listening' : guests.size + ' listening';
+  const ul = $('lnames');
+  ul.innerHTML = '';
+  guests.forEach((g) => {
+    const li = document.createElement('li');
+    li.className = 'flex justify-between';
+    const a = document.createElement('span'); a.textContent = g.name + (g.note ? ' (' + g.note + ')' : '');
+    const b = document.createElement('span'); b.className = 'text-[#8d96a3]'; b.textContent = 'since ' + g.joinedAt;
+    li.append(a, b);
+    ul.appendChild(li);
+  });
+  $('lactivity').textContent = lastEvent;
+  setStatus('Your code is ' + sessionCode + '. Tell your friends to join.');
+}
+function logEvent(text) { lastEvent = text + ' at ' + clock(); renderListeners(); }
+
+function addGuest(c, rawName) {
+  if (guests.has(c.peer)) return;
+  const name = String(rawName || '').trim().slice(0, 16) || 'Guest';
+  const call = peer.call(c.peer, streamDest.stream, { sdpTransform: musicSdp });
+  call.on('error', (e) => setStatus('Audio error: ' + e));
+  guests.set(c.peer, { name, conn: c, call, joinedAt: clock(), lastSeen: Date.now() });
+  if (index >= 0) c.send({ t: 'now', title: title(songs[index]) });
+  logEvent(name + ' joined');
+}
+function removeGuest(id, verb) {
+  const g = guests.get(id);
+  if (!g) return;
+  guests.delete(id);
+  try { g.call.close(); } catch (e) {}
+  try { g.conn.close(); } catch (e) {}
+  logEvent(g.name + ' ' + verb);
+}
 
 function setGuestMode(on) {
   $('addlabel').classList.toggle('hidden', on);
   $('library').classList.toggle('hidden', on);
   $('hostctl').classList.toggle('hidden', on);
   $('guestmsg').classList.toggle('hidden', !on);
+  $('leave').classList.toggle('hidden', !on);
+  if (on) $('listeners').classList.add('hidden');
   if (on) now.textContent = 'Waiting for your friend to play something';
 }
 
@@ -206,25 +260,28 @@ function setupHostAudio() {
   ctx.resume();
 }
 
-function wire(c) {
+// Guest side: connect to the host, say our name, and keep pinging so the host knows we are here
+function guestWire(c) {
   conn = c;
   const ready = () => {
-    if (isHost) {
-      setStatus('Friend connected. Pick a song and play.');
-      if (index >= 0) send({ t: 'now', title: title(songs[index]) });
-      const call = peer.call(c.peer, streamDest.stream, { sdpTransform: musicSdp });
-      call.on('error', (e) => setStatus('Audio error: ' + e));
-    } else {
-      setStatus('Connected. Waiting for audio...');
-      setGuestMode(true);
-    }
+    setStatus('Connected. Waiting for audio...');
+    setGuestMode(true);
+    c.send({ t: 'hello', name: myName() });
+    clearInterval(pingTimer);
+    pingTimer = setInterval(() => { if (c.open) c.send({ t: 'ping' }); }, 5000);
   };
   if (c.open) ready(); else c.on('open', ready);
-  c.on('data', (m) => { if (m.t === 'now') now.textContent = m.title; });
+  c.on('data', (m) => {
+    if (m.t === 'now') now.textContent = m.title;
+    else if (m.t === 'end') hostEnded = true;
+  });
   c.on('close', () => {
+    if (leftByMe) return;
     conn = null;
-    setStatus(isHost ? 'Friend disconnected.' : 'Host left the session.');
-    if (!isHost) setGuestMode(false);
+    clearInterval(pingTimer);
+    remote.pause();
+    setStatus(hostEnded ? 'Host ended the session.' : 'Host left the session.');
+    setGuestMode(false);
   });
 }
 
@@ -238,16 +295,41 @@ $('start').onclick = () => {
   setupHostAudio();
   unlock(player);
   if (peer) peer.destroy();
+  guests.clear();
+  clearInterval(watchTimer);
   isHost = true;
-  const code = String(Math.floor(1000 + Math.random() * 9000));
-  peer = new Peer('gymmusic-' + code, PEER_OPTIONS);
-  peer.on('open', () => setStatus('Your code is ' + code + '. Tell your friend to join.'));
+  sessionCode = String(Math.floor(1000 + Math.random() * 9000));
+  lastEvent = '';
+  peer = new Peer('gymmusic-' + sessionCode, PEER_OPTIONS);
+  peer.on('open', () => renderListeners());
   peer.on('connection', (c) => {
-    setStatus('Friend found. Setting up the link...');
-    c.on('iceStateChanged', (s) => setStatus('Link check: ' + s));
-    wire(c);
+    c.on('data', (m) => {
+      if (m.t === 'hello') addGuest(c, m.name);
+      else if (m.t === 'ping') { const g = guests.get(c.peer); if (g) g.lastSeen = Date.now(); }
+      else if (m.t === 'bye') removeGuest(c.peer, 'left');
+    });
+    c.on('close', () => removeGuest(c.peer, 'left'));
+    c.on('error', () => removeGuest(c.peer, 'dropped'));
   });
   peer.on('error', (e) => setStatus('Error: ' + e.type + '. Tap Start session to try again.'));
+
+  // Check each friend's audio link, not just their "still here" pings
+  watchTimer = setInterval(() => {
+    let changed = false;
+    guests.forEach((g, id) => {
+      const pc = g.call && g.call.peerConnection;
+      const ice = pc ? pc.iceConnectionState : 'new';
+      if (ice === 'failed' || ice === 'closed') return removeGuest(id, 'lost connection');
+      const linkUp = ice === 'connected' || ice === 'completed';
+      const quiet = Date.now() - g.lastSeen > 30000;
+      const trouble = !linkUp && (ice === 'disconnected' || quiet);
+      if (trouble) { if (!g.troubleSince) g.troubleSince = Date.now(); } else g.troubleSince = null;
+      if (g.troubleSince && Date.now() - g.troubleSince > 60000) return removeGuest(id, 'lost connection');
+      const note = trouble ? 'not responding' : '';
+      if (note !== g.note) { g.note = note; changed = true; }
+    });
+    if (changed) renderListeners();
+  }, 5000);
 };
 
 $('join').onclick = () => {
@@ -256,6 +338,10 @@ $('join').onclick = () => {
   unlock(remote);
   if (peer) peer.destroy();
   isHost = false;
+  leftByMe = false;
+  hostEnded = false;
+  clearInterval(watchTimer);
+  guests.clear();
   setStatus('Step 1 of 3: reaching the connection service...');
   peer = new Peer(undefined, PEER_OPTIONS);
 
@@ -267,7 +353,7 @@ $('join').onclick = () => {
     setStatus('Step 2 of 3: looking for your friend...');
     const c = peer.connect('gymmusic-' + code, { reliable: true });
     c.on('iceStateChanged', (s) => setStatus('Step 3 of 3: link check: ' + s));
-    wire(c);
+    guestWire(c);
     setTimeout(() => {
       if (!conn || !conn.open) setStatus('Stuck at the link step. The phones found each other but could not connect directly. The relay may be missing or wrong.');
     }, 20000);
@@ -299,6 +385,36 @@ $('picker').onchange = async (e) => {
   e.target.value = '';
   if (skipped) setStatus(skipped + ' file(s) skipped because they are not audio.');
   refresh();
+};
+
+// Friend taps Leave
+$('leave').onclick = () => {
+  leftByMe = true;
+  try { if (conn && conn.open) conn.send({ t: 'bye' }); } catch (e) {}
+  clearInterval(pingTimer);
+  setTimeout(() => {
+    if (peer) peer.destroy();
+    peer = null; conn = null;
+    remote.pause(); remote.srcObject = null;
+    setGuestMode(false);
+    setStatus('You left the session.');
+  }, 200);
+};
+
+// Host taps End session
+$('end').onclick = () => {
+  send({ t: 'end' });
+  clearInterval(watchTimer);
+  setTimeout(() => {
+    const all = [...guests.values()];
+    guests.clear();
+    all.forEach((g) => { try { g.conn.close(); } catch (e) {} });
+    if (peer) peer.destroy();
+    peer = null;
+    $('listeners').classList.add('hidden');
+    $('end').classList.add('hidden');
+    setStatus('Session ended. Tap Start session for a new one.');
+  }, 200);
 };
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist();

@@ -3,10 +3,13 @@ const player = $('player'), remote = $('remote'), list = $('list'), now = $('now
 const playBtn = $('play'), statusEl = $('status'), emptyMsg = $('empty');
 const SILENCE = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
 
-// Relay servers: they connect the two phones when cellular networks block direct links
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
-  // PASTE YOUR METERED ENTRIES HERE
+  { urls: 'stun:stun.relay.metered.ca:80' },
+  { urls: 'turn:global.relay.metered.ca:80', username: '2d13b11c777ed832f36508d8', credential: 'rMPG82aBxmp77mmf' },
+  { urls: 'turn:global.relay.metered.ca:80?transport=tcp', username: '2d13b11c777ed832f36508d8', credential: 'rMPG82aBxmp77mmf' },
+  { urls: 'turn:global.relay.metered.ca:443', username: '2d13b11c777ed832f36508d8', credential: 'rMPG82aBxmp77mmf' },
+  { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: '2d13b11c777ed832f36508d8', credential: 'rMPG82aBxmp77mmf' },
 ];
 const PEER_OPTIONS = { config: { iceServers: ICE_SERVERS } };
 
@@ -210,7 +213,11 @@ $('start').onclick = () => {
   const code = String(Math.floor(1000 + Math.random() * 9000));
   peer = new Peer('gymmusic-' + code, PEER_OPTIONS);
   peer.on('open', () => setStatus('Your code is ' + code + '. Tell your friend to join.'));
-  peer.on('connection', wire);
+  peer.on('connection', (c) => {
+    setStatus('Friend found. Setting up the link...');
+    c.on('iceStateChanged', (s) => setStatus('Link check: ' + s));
+    wire(c);
+  });
   peer.on('error', (e) => setStatus('Error: ' + e.type + '. Tap Start session to try again.'));
 };
 
@@ -220,14 +227,23 @@ $('join').onclick = () => {
   unlock(remote);
   if (peer) peer.destroy();
   isHost = false;
-  setStatus('Connecting...');
+  setStatus('Step 1 of 3: reaching the connection service...');
   peer = new Peer(undefined, PEER_OPTIONS);
+
+  setTimeout(() => {
+    if (!peer.open) setStatus('Step 1 failed: cannot reach the connection service. Check your signal and try again.');
+  }, 10000);
+
   peer.on('open', () => {
-    wire(peer.connect('gymmusic-' + code, { reliable: true }));
+    setStatus('Step 2 of 3: looking for your friend...');
+    const c = peer.connect('gymmusic-' + code, { reliable: true });
+    c.on('iceStateChanged', (s) => setStatus('Step 3 of 3: link check: ' + s));
+    wire(c);
     setTimeout(() => {
-      if (!conn || !conn.open) setStatus('Still not connected. Ask your friend to tap Start session again for a new code.');
-    }, 15000);
+      if (!conn || !conn.open) setStatus('Stuck at the link step. The phones found each other but could not connect directly. The relay may be missing or wrong.');
+    }, 20000);
   });
+
   // The host calls us with the live audio
   peer.on('call', (call) => {
     call.answer();

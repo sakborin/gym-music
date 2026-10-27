@@ -207,10 +207,19 @@ $('join').onclick = () => {
   peer.on('error', (e) => setStatus('Error: ' + e.type + '. Check the code and try again.'));
 };
 
+// File picker: no "accept" filter in the HTML (iOS greys out MP3 with it),
+// so we check the file type here instead.
 $('picker').onchange = async (e) => {
-  for (const f of e.target.files) await saveSong(f);
+  const okExt = /\.(mp3|m4a|aac|wav|aiff?|caf|mp4|flac)$/i;
+  let skipped = 0;
+  for (const f of e.target.files) {
+    if (f.type.startsWith('audio/') || okExt.test(f.name)) await saveSong(f);
+    else skipped++;
+  }
   e.target.value = '';
+  if (skipped) setStatus(skipped + ' file(s) skipped because they are not audio.');
   refresh();
 };
+
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
-refresh();  
+refresh();

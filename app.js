@@ -3,6 +3,24 @@ const player = $('player'), remote = $('remote'), list = $('list'), now = $('now
 const playBtn = $('play'), statusEl = $('status'), emptyMsg = $('empty');
 const SILENCE = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
 
+// ---------- Pause-glitch fixes ----------
+// Fix 2 switch: leave false first. If the glitch after pausing is still there
+// after Fix 1, change this to true. It sends a tiny inaudible tone to your
+// friend only, so the stream never goes fully silent.
+const KEEP_ALIVE_TONE = false;
+
+// Fix 1: tell the audio engine this is music, not a phone call
+// (no silence-saving mode, stereo, higher quality).
+function musicSdp(sdp) {
+  const m = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/i);
+  if (!m) return sdp;
+  const pt = m[1];
+  const params = 'minptime=10;useinbandfec=1;usedtx=0;stereo=1;sprop-stereo=1;maxaveragebitrate=128000';
+  const line = new RegExp('a=fmtp:' + pt + ' [^\\r\\n]*');
+  return line.test(sdp) ? sdp.replace(line, 'a=fmtp:' + pt + ' ' + params) : sdp;
+}
+
+// Relay servers: they connect the two phones when cellular networks block direct links
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun.relay.metered.ca:80' },
@@ -174,6 +192,17 @@ function setupHostAudio() {
   source.connect(delayNode);
   delayNode.connect(ctx.destination);   // what you hear (delayed)
   source.connect(streamDest);           // what your friend hears (live)
+
+  // Fix 2 (optional): a tiny inaudible tone, sent to the stream only, so it never goes fully silent
+  if (KEEP_ALIVE_TONE) {
+    const keep = ctx.createOscillator();
+    const keepGain = ctx.createGain();
+    keep.frequency.value = 180;
+    keepGain.gain.value = 0.001;
+    keep.connect(keepGain);
+    keepGain.connect(streamDest);
+    keep.start();
+  }
   ctx.resume();
 }
 
@@ -183,7 +212,7 @@ function wire(c) {
     if (isHost) {
       setStatus('Friend connected. Pick a song and play.');
       if (index >= 0) send({ t: 'now', title: title(songs[index]) });
-      const call = peer.call(c.peer, streamDest.stream);
+      const call = peer.call(c.peer, streamDest.stream, { sdpTransform: musicSdp });
       call.on('error', (e) => setStatus('Audio error: ' + e));
     } else {
       setStatus('Connected. Waiting for audio...');
@@ -246,7 +275,7 @@ $('join').onclick = () => {
 
   // The host calls us with the live audio
   peer.on('call', (call) => {
-    call.answer();
+    call.answer(null, { sdpTransform: musicSdp });
     call.on('stream', (stream) => {
       remote.srcObject = stream;
       remote.play().then(() => setStatus('Listening')).catch(() => {

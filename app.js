@@ -31,6 +31,9 @@ const ICE_SERVERS = [
 ];
 const PEER_OPTIONS = { config: { iceServers: ICE_SERVERS } };
 
+// Needed so internet audio can be passed on to friends (the source site must allow it)
+player.crossOrigin = 'anonymous';
+
 const ICON = {
   play: '<svg viewBox="0 0 24 24" class="size-7" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
   pause: '<svg viewBox="0 0 24 24" class="size-7" fill="currentColor"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>',
@@ -45,6 +48,9 @@ let ctx = null, delayNode = null, streamDest = null, delayMs = 0;
 let guests = new Map();            // host only: everyone listening right now
 let sessionCode = '', lastEvent = '', pingTimer = null, watchTimer = null;
 let leftByMe = false, hostEnded = false;
+let gainNode = null, hostVol = 1;   // host's own volume (does not change what friends hear)
+let results = [], mode = 'local', onlineIndex = -1, hasTrack = false;   // online music state
+let nowLabel = '';   // what is playing, sent to friends who join late
 
 // ---------- Storage (stays on this phone) ----------
 function openDB() {
@@ -90,7 +96,7 @@ async function refresh() {
     del.onclick = async (e) => {
       e.stopPropagation();
       await deleteSong(song.name);
-      if (i === index) { player.pause(); now.textContent = 'Nothing playing'; index = -1; }
+      if (i === index) { player.pause(); now.textContent = 'Nothing playing'; index = -1; hasTrack = false; }
       refresh();
     };
     li.onclick = () => playLocal(i);
@@ -103,28 +109,39 @@ async function refresh() {
 function playLocal(i) {
   if (!songs[i]) return;
   index = i;
+  mode = 'local'; onlineIndex = -1; hasTrack = true;
+  renderResults();
   if (player.dataset.url) URL.revokeObjectURL(player.dataset.url);
   player.dataset.url = URL.createObjectURL(songs[i].blob);
   player.src = player.dataset.url;
-  if (ctx) ctx.resume();
+  setupHostAudio();
   player.play();
-  now.textContent = title(songs[i]);
-  send({ t: 'now', title: title(songs[i]) });
+  nowLabel = title(songs[i]);
+  now.textContent = nowLabel;
+  send({ t: 'now', title: nowLabel });
   if ('mediaSession' in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: title(songs[i]), artist: 'Gym Music' });
   refresh();
 }
 function next() {
+  if (mode === 'online') {
+    if (!results.length) return;
+    return playOnline(shuffle ? Math.floor(Math.random() * results.length) : (onlineIndex + 1) % results.length);
+  }
   if (!songs.length) return;
   playLocal(shuffle ? Math.floor(Math.random() * songs.length) : (index + 1) % songs.length);
 }
 function prev() {
-  if (!songs.length) return;
   if (player.currentTime > 3) { player.currentTime = 0; return; }
+  if (mode === 'online') {
+    if (!results.length) return;
+    return playOnline((onlineIndex - 1 + results.length) % results.length);
+  }
+  if (!songs.length) return;
   playLocal((index - 1 + songs.length) % songs.length);
 }
 function toggle() {
-  if (index < 0) return playLocal(0);
-  if (ctx) ctx.resume();
+  if (!hasTrack) return playLocal(0);
+  setupHostAudio();
   player.paused ? player.play() : player.pause();
 }
 const fmt = (s) => isFinite(s) ? Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0') : '0:00';
@@ -137,9 +154,18 @@ player.ontimeupdate = () => {
   $('dur').textContent = fmt(player.duration);
 };
 player.onended = () => {
-  if (index < 0) return;
+  if (!hasTrack) return;
+  if (mode === 'online' && onlineIndex < 0) return;
+  if (mode === 'local' && index < 0) return;
   if (loopMode === 2) { player.currentTime = 0; player.play(); return; }
-  if (loopMode === 1 || shuffle || index < songs.length - 1) next();
+  const last = mode === 'online' ? onlineIndex >= results.length - 1 : index >= songs.length - 1;
+  if (loopMode === 1 || shuffle || !last) next();
+};
+player.onplaying = () => { if (mode === 'online') setOn('Playing from the internet.'); };
+player.onerror = () => {
+  if (!hasTrack) return;
+  if (mode === 'online') setOn("Couldn't stream this one. The source may block it, or the track isn't available. Try another.");
+  else setStatus("Couldn't play this file.");
 };
 seek.oninput = () => { if (player.duration) player.currentTime = (seek.value / 100) * player.duration; };
 
@@ -164,12 +190,123 @@ function setDelay(ms) {
 $('more').onclick = () => setDelay(delayMs + 50);
 $('less').onclick = () => setDelay(delayMs - 50);
 
+// ---------- Volume (each person controls only their own) ----------
+const curve = (pct) => Math.pow(pct / 100, 2);   // feels smoother than a straight line
+function loadVol(k) {
+  try { const v = parseInt(localStorage.getItem(k), 10); return isNaN(v) ? 100 : Math.max(0, Math.min(100, v)); } catch (e) { return 100; }
+}
+function saveVol(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+// Host volume: only changes what YOU hear, friends are not affected
+$('vol').value = loadVol('gym-vol');
+hostVol = curve($('vol').value);
+$('volval').textContent = $('vol').value + '%';
+$('vol').oninput = () => {
+  hostVol = curve($('vol').value);
+  if (gainNode) gainNode.gain.value = hostVol;
+  $('volval').textContent = $('vol').value + '%';
+  saveVol('gym-vol', $('vol').value);
+};
+
+// Guest volume: works on laptops and Android. iPhones ignore it (use the volume buttons there).
+const volOK = (() => { const a = document.createElement('audio'); a.volume = 0.5; return a.volume === 0.5; })();
+$('gvol').value = loadVol('gym-gvol');
+$('gvolval').textContent = $('gvol').value + '%';
+if (volOK) remote.volume = curve($('gvol').value);
+$('gvol').oninput = () => {
+  if (volOK) remote.volume = curve($('gvol').value);
+  $('gvolval').textContent = $('gvol').value + '%';
+  saveVol('gym-gvol', $('gvol').value);
+};
+
 if ('mediaSession' in navigator) {
   navigator.mediaSession.setActionHandler('play', toggle);
   navigator.mediaSession.setActionHandler('pause', toggle);
   navigator.mediaSession.setActionHandler('nexttrack', next);
   navigator.mediaSession.setActionHandler('previoustrack', prev);
 }
+
+// ---------- Online music (Audius search + pasted links) ----------
+const AUDIUS_API = 'https://api.audius.co/v1';
+const APP_NAME = 'GymMusic';
+const setOn = (t) => { $('onstatus').textContent = t; };
+
+function renderResults() {
+  const ul = $('results');
+  ul.innerHTML = '';
+  results.forEach((t, i) => {
+    const active = mode === 'online' && i === onlineIndex;
+    const li = document.createElement('li');
+    li.className = 'cursor-pointer rounded-xl border-b border-[#2b313b] px-2 py-2.5' + (active ? ' bg-[#15181e]' : '');
+    const a = document.createElement('div');
+    a.className = 'truncate text-sm' + (active ? ' text-[#6f8dff]' : '');
+    a.textContent = t.title;
+    const b = document.createElement('div');
+    b.className = 'truncate text-xs text-[#8d96a3]';
+    b.textContent = t.artist;
+    li.append(a, b);
+    li.onclick = () => playOnline(i);
+    ul.appendChild(li);
+  });
+}
+
+function startUrl(url, label) {
+  if (player.dataset.url) { URL.revokeObjectURL(player.dataset.url); player.dataset.url = ''; }
+  player.src = url;
+  hasTrack = true;
+  setupHostAudio();
+  player.play().catch(() => {});
+  nowLabel = label;
+  now.textContent = label;
+  send({ t: 'now', title: label });
+  if ('mediaSession' in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: label, artist: 'Gym Music' });
+}
+
+function playOnline(i) {
+  const t = results[i];
+  if (!t) return;
+  mode = 'online'; onlineIndex = i; index = -1;
+  setOn('Loading...');
+  startUrl(t.url, t.artist ? t.title + ' - ' + t.artist : t.title);
+  renderResults();
+  refresh();
+}
+
+async function searchOnline() {
+  const q = $('q').value.trim();
+  if (!q) return setOn('Type a song or artist first.');
+  setOn('Searching...');
+  try {
+    const r = await fetch(AUDIUS_API + '/tracks/search?query=' + encodeURIComponent(q) + '&limit=20&app_name=' + APP_NAME);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    results = (j.data || []).filter((t) => t.is_streamable !== false).map((t) => ({
+      title: t.title || 'Untitled',
+      artist: (t.user && t.user.name) || '',
+      url: AUDIUS_API + '/tracks/' + t.id + '/stream?app_name=' + APP_NAME
+    }));
+    onlineIndex = -1;
+    renderResults();
+    setOn(results.length ? 'Tap a song to play. Music from Audius. Credit goes to the artists.' : 'No results. Try other words.');
+  } catch (e) {
+    setOn('Search failed. Check your connection. (' + e.message + ')');
+  }
+}
+
+function playLink() {
+  const raw = $('linkin').value.trim();
+  if (/youtube\.com|youtu\.be|spotify\.com/i.test(raw)) return setOn("YouTube and Spotify links can't be played here. Use a direct link to an audio file.");
+  if (!/^https:\/\//i.test(raw)) return setOn('Paste a full link that starts with https.');
+  let name = 'Linked audio';
+  try { name = decodeURIComponent(new URL(raw).pathname.split('/').pop()) || name; } catch (e) {}
+  results = [{ title: name.replace(/\.[^.]+$/, ''), artist: '', url: raw }];
+  playOnline(0);
+}
+
+$('qbtn').onclick = searchOnline;
+$('q').onkeydown = (e) => { if (e.key === 'Enter') searchOnline(); };
+$('linkbtn').onclick = playLink;
+$('linkin').onkeydown = (e) => { if (e.key === 'Enter') playLink(); };
 
 // ---------- Listen together ----------
 const setStatus = (t) => { statusEl.textContent = t; };
@@ -212,7 +349,7 @@ function addGuest(c, rawName) {
   const call = peer.call(c.peer, streamDest.stream, { sdpTransform: musicSdp });
   call.on('error', (e) => setStatus('Audio error: ' + e));
   guests.set(c.peer, { name, conn: c, call, joinedAt: clock(), lastSeen: Date.now() });
-  if (index >= 0) c.send({ t: 'now', title: title(songs[index]) });
+  if (hasTrack && nowLabel) c.send({ t: 'now', title: nowLabel });
   logEvent(name + ' joined');
 }
 function removeGuest(id, verb) {
@@ -230,6 +367,10 @@ function setGuestMode(on) {
   $('hostctl').classList.toggle('hidden', on);
   $('guestmsg').classList.toggle('hidden', !on);
   $('leave').classList.toggle('hidden', !on);
+  $('gvolrow').classList.toggle('hidden', !on || !volOK);
+  $('guestmsg').textContent = volOK
+    ? "Listening to your friend's session. Use the slider to change the volume."
+    : "Listening to your friend's session. Use your phone's volume buttons to change the volume.";
   if (on) $('listeners').classList.add('hidden');
   if (on) now.textContent = 'Waiting for your friend to play something';
 }
@@ -243,9 +384,12 @@ function setupHostAudio() {
   delayNode = ctx.createDelay(1.0);
   delayNode.delayTime.value = delayMs / 1000;
   streamDest = ctx.createMediaStreamDestination();
-  source.connect(delayNode);
-  delayNode.connect(ctx.destination);   // what you hear (delayed)
-  source.connect(streamDest);           // what your friend hears (live)
+  gainNode = ctx.createGain();
+  gainNode.gain.value = hostVol;
+  source.connect(gainNode);
+  gainNode.connect(delayNode);
+  delayNode.connect(ctx.destination);   // what you hear (volume, then delay)
+  source.connect(streamDest);           // what your friend hears (live, not affected by your volume)
 
   // Fix 2 (optional): a tiny inaudible tone, sent to the stream only, so it never goes fully silent
   if (KEEP_ALIVE_TONE) {
@@ -293,7 +437,7 @@ function unlock(el) {
 
 $('start').onclick = () => {
   setupHostAudio();
-  unlock(player);
+  if (!hasTrack) unlock(player);
   if (peer) peer.destroy();
   guests.clear();
   clearInterval(watchTimer);

@@ -1,3 +1,9 @@
+// ===== YOUR SETTINGS =====
+// Paste your NEW Google key between the quotes. The folder ID is already filled in.
+const DRIVE_KEY = 'AIzaSyDkbcBEC6VGpx_AVZ5mA6rTjueXeYly4r4';
+const DRIVE_FOLDER = '1TZeXtpfhbAp4cyWqEcu2-l__sW4phEIp';
+// =========================
+
 const $ = (id) => document.getElementById(id);
 const player = $('player'), remote = $('remote'), list = $('list'), now = $('now'), seek = $('seek');
 const playBtn = $('play'), statusEl = $('status'), emptyMsg = $('empty');
@@ -31,7 +37,7 @@ const ICE_SERVERS = [
 ];
 const PEER_OPTIONS = { config: { iceServers: ICE_SERVERS } };
 
-// Needed so internet audio can be passed on to friends (the source site must allow it)
+// Needed so audio from Google Drive can be passed on to friends
 player.crossOrigin = 'anonymous';
 
 const ICON = {
@@ -49,7 +55,7 @@ let guests = new Map();            // host only: everyone listening right now
 let sessionCode = '', lastEvent = '', pingTimer = null, watchTimer = null;
 let leftByMe = false, hostEnded = false;
 let gainNode = null, hostVol = 1;   // host's own volume (does not change what friends hear)
-let results = [], mode = 'local', onlineIndex = -1, hasTrack = false;   // online music state
+let results = [], mode = 'local', driveIndex = -1, hasTrack = false;   // Drive music state (mode is 'local' or 'drive')
 let nowLabel = '';   // what is playing, sent to friends who join late
 
 // ---------- Storage (stays on this phone) ----------
@@ -109,7 +115,7 @@ async function refresh() {
 function playLocal(i) {
   if (!songs[i]) return;
   index = i;
-  mode = 'local'; onlineIndex = -1; hasTrack = true;
+  mode = 'local'; driveIndex = -1; hasTrack = true;
   renderResults();
   if (player.dataset.url) URL.revokeObjectURL(player.dataset.url);
   player.dataset.url = URL.createObjectURL(songs[i].blob);
@@ -123,18 +129,18 @@ function playLocal(i) {
   refresh();
 }
 function next() {
-  if (mode === 'online') {
+  if (mode === 'drive') {
     if (!results.length) return;
-    return playOnline(shuffle ? Math.floor(Math.random() * results.length) : (onlineIndex + 1) % results.length);
+    return playDrive(shuffle ? Math.floor(Math.random() * results.length) : (driveIndex + 1) % results.length);
   }
   if (!songs.length) return;
   playLocal(shuffle ? Math.floor(Math.random() * songs.length) : (index + 1) % songs.length);
 }
 function prev() {
   if (player.currentTime > 3) { player.currentTime = 0; return; }
-  if (mode === 'online') {
+  if (mode === 'drive') {
     if (!results.length) return;
-    return playOnline((onlineIndex - 1 + results.length) % results.length);
+    return playDrive((driveIndex - 1 + results.length) % results.length);
   }
   if (!songs.length) return;
   playLocal((index - 1 + songs.length) % songs.length);
@@ -155,16 +161,16 @@ player.ontimeupdate = () => {
 };
 player.onended = () => {
   if (!hasTrack) return;
-  if (mode === 'online' && onlineIndex < 0) return;
+  if (mode === 'drive' && driveIndex < 0) return;
   if (mode === 'local' && index < 0) return;
   if (loopMode === 2) { player.currentTime = 0; player.play(); return; }
-  const last = mode === 'online' ? onlineIndex >= results.length - 1 : index >= songs.length - 1;
+  const last = mode === 'drive' ? driveIndex >= results.length - 1 : index >= songs.length - 1;
   if (loopMode === 1 || shuffle || !last) next();
 };
-player.onplaying = () => { if (mode === 'online') setOn('Playing from the internet.'); };
+player.onplaying = () => { if (mode === 'drive') setOn('Playing from Google Drive.'); };
 player.onerror = () => {
   if (!hasTrack) return;
-  if (mode === 'online') setOn("Couldn't stream this one. The source may block it, or the track isn't available. Try another.");
+  if (mode === 'drive') setOn("Couldn't play this song from Drive. Wait a moment and try again, or tap another song.");
   else setStatus("Couldn't play this file.");
 };
 seek.oninput = () => { if (player.duration) player.currentTime = (seek.value / 100) * player.duration; };
@@ -226,32 +232,32 @@ if ('mediaSession' in navigator) {
   navigator.mediaSession.setActionHandler('previoustrack', prev);
 }
 
-// ---------- Online music (Audius search + pasted links) ----------
-const AUDIUS_API = 'https://api.audius.co/v1';
-const APP_NAME = 'GymMusic';
+// ---------- Drive music (your own Google Drive folder) ----------
 const setOn = (t) => { $('onstatus').textContent = t; };
+let driveAll = [];       // every song in the Drive folder
+let currentUrl = '';     // the Drive song playing right now
+
+const driveUrl = (id) => 'https://www.googleapis.com/drive/v3/files/' + id + '?alt=media&key=' + encodeURIComponent(DRIVE_KEY);
 
 function renderResults() {
   const ul = $('results');
   ul.innerHTML = '';
   results.forEach((t, i) => {
-    const active = mode === 'online' && i === onlineIndex;
+    const active = mode === 'drive' && i === driveIndex;
     const li = document.createElement('li');
-    li.className = 'cursor-pointer rounded-xl border-b border-[#2b313b] px-2 py-2.5' + (active ? ' bg-[#15181e]' : '');
+    li.className = 'cursor-pointer rounded-xl border-b border-[#2b313b] px-2 py-3' + (active ? ' bg-[#15181e]' : '');
     const a = document.createElement('div');
     a.className = 'truncate text-sm' + (active ? ' text-[#6f8dff]' : '');
     a.textContent = t.title;
-    const b = document.createElement('div');
-    b.className = 'truncate text-xs text-[#8d96a3]';
-    b.textContent = t.artist;
-    li.append(a, b);
-    li.onclick = () => playOnline(i);
+    li.append(a);
+    li.onclick = () => playDrive(i);
     ul.appendChild(li);
   });
 }
 
 function startUrl(url, label) {
   if (player.dataset.url) { URL.revokeObjectURL(player.dataset.url); player.dataset.url = ''; }
+  currentUrl = url;
   player.src = url;
   hasTrack = true;
   setupHostAudio();
@@ -262,51 +268,46 @@ function startUrl(url, label) {
   if ('mediaSession' in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: label, artist: 'Gym Music' });
 }
 
-function playOnline(i) {
+function playDrive(i) {
   const t = results[i];
   if (!t) return;
-  mode = 'online'; onlineIndex = i; index = -1;
+  mode = 'drive'; driveIndex = i; index = -1;
   setOn('Loading...');
-  startUrl(t.url, t.artist ? t.title + ' - ' + t.artist : t.title);
+  startUrl(t.url, t.title);
   renderResults();
   refresh();
 }
 
-async function searchOnline() {
-  const q = $('q').value.trim();
-  if (!q) return setOn('Type a song or artist first.');
-  setOn('Searching...');
+function applyFilter() {
+  const q = $('q').value.trim().toLowerCase();
+  results = driveAll.filter((t) => t.title.toLowerCase().includes(q));
+  driveIndex = mode === 'drive' ? results.findIndex((t) => t.url === currentUrl) : -1;
+  renderResults();
+}
+
+async function loadDrive() {
+  if (DRIVE_KEY.startsWith('PASTE')) return setOn('Add your Google key in app.js first (see the instructions).');
+  setOn('Loading your Drive folder...');
   try {
-    const r = await fetch(AUDIUS_API + '/tracks/search?query=' + encodeURIComponent(q) + '&limit=20&app_name=' + APP_NAME);
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const q = "'" + DRIVE_FOLDER + "' in parents and trashed=false";
+    const url = 'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(q) +
+      '&fields=' + encodeURIComponent('files(id,name,mimeType,size)') +
+      '&orderBy=name&pageSize=1000&key=' + encodeURIComponent(DRIVE_KEY);
+    const r = await fetch(url);
     const j = await r.json();
-    results = (j.data || []).filter((t) => t.is_streamable !== false).map((t) => ({
-      title: t.title || 'Untitled',
-      artist: (t.user && t.user.name) || '',
-      url: AUDIUS_API + '/tracks/' + t.id + '/stream?app_name=' + APP_NAME
-    }));
-    onlineIndex = -1;
-    renderResults();
-    setOn(results.length ? 'Tap a song to play. Music from Audius. Credit goes to the artists.' : 'No results. Try other words.');
+    if (!r.ok) throw new Error((j.error && j.error.message) || 'HTTP ' + r.status);
+    driveAll = (j.files || [])
+      .filter((f) => /^audio\//.test(f.mimeType) || /\.(mp3|m4a|aac|wav|flac|ogg)$/i.test(f.name))
+      .map((f) => ({ title: f.name.replace(/\.[^.]+$/, ''), artist: '', url: driveUrl(f.id) }));
+    applyFilter();
+    setOn(driveAll.length ? driveAll.length + ' song(s) in your Drive folder.' : 'The folder is empty. Add songs to it in Google Drive, then tap Refresh.');
   } catch (e) {
-    setOn('Search failed. Check your connection. (' + e.message + ')');
+    setOn("Couldn't load Drive: " + e.message);
   }
 }
 
-function playLink() {
-  const raw = $('linkin').value.trim();
-  if (/youtube\.com|youtu\.be|spotify\.com/i.test(raw)) return setOn("YouTube and Spotify links can't be played here. Use a direct link to an audio file.");
-  if (!/^https:\/\//i.test(raw)) return setOn('Paste a full link that starts with https.');
-  let name = 'Linked audio';
-  try { name = decodeURIComponent(new URL(raw).pathname.split('/').pop()) || name; } catch (e) {}
-  results = [{ title: name.replace(/\.[^.]+$/, ''), artist: '', url: raw }];
-  playOnline(0);
-}
-
-$('qbtn').onclick = searchOnline;
-$('q').onkeydown = (e) => { if (e.key === 'Enter') searchOnline(); };
-$('linkbtn').onclick = playLink;
-$('linkin').onkeydown = (e) => { if (e.key === 'Enter') playLink(); };
+$('q').oninput = applyFilter;
+$('refresh').onclick = loadDrive;
 
 // ---------- Listen together ----------
 const setStatus = (t) => { statusEl.textContent = t; };
@@ -563,3 +564,4 @@ $('end').onclick = () => {
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
 refresh();
+loadDrive();

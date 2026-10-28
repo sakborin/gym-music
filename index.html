@@ -46,19 +46,14 @@
 
   <main id="library" class="mx-auto max-w-lg px-3">
     <div class="mx-2 mb-4 rounded-2xl border border-[#2b313b] bg-[#1e232b] p-4">
-      <p class="mb-3 text-sm font-semibold">Online music</p>
-      <div class="flex gap-2">
-        <input id="q" placeholder="Search songs or artists"
-          class="min-w-0 flex-1 rounded-xl border border-[#2b313b] bg-[#15181e] px-3 py-2.5 text-sm outline-none focus:border-[#6f8dff]">
-        <button id="qbtn" class="rounded-xl bg-[#6f8dff] px-4 py-2.5 text-sm font-semibold text-white">Search</button>
+      <div class="mb-3 flex items-center justify-between">
+        <p class="text-sm font-semibold">My Drive music</p>
+        <button id="refresh" class="rounded-full border border-[#2b313b] px-3 py-1.5 text-xs text-[#8d96a3]">Refresh</button>
       </div>
-      <div class="mt-2 flex gap-2">
-        <input id="linkin" placeholder="Or paste a direct audio link"
-          class="min-w-0 flex-1 rounded-xl border border-[#2b313b] bg-[#15181e] px-3 py-2.5 text-sm outline-none focus:border-[#6f8dff]">
-        <button id="linkbtn" class="rounded-xl border border-[#6f8dff] px-4 py-2.5 text-sm font-semibold text-[#6f8dff]">Play</button>
-      </div>
-      <p id="onstatus" class="mt-2 text-xs text-[#8d96a3]">Search uses Audius, a free music platform. Nothing is saved on your phone.</p>
-      <ul id="results" class="mt-2"></ul>
+      <input id="q" placeholder="Filter by name"
+        class="w-full rounded-xl border border-[#2b313b] bg-[#15181e] px-3 py-2.5 text-sm outline-none focus:border-[#6f8dff]">
+      <p id="onstatus" class="mt-2 text-xs text-[#8d96a3]">Loading...</p>
+      <ul id="results" class="mt-2 max-h-80 overflow-y-auto"></ul>
     </div>
 
     <p class="px-2.5 pb-1 text-sm font-semibold text-[#8d96a3]">On this phone</p>

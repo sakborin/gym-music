@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Drive test</title>
+  <style>
+    body { background:#15181e; color:#eee; font-family:-apple-system,system-ui,sans-serif; margin:0; padding:20px; max-width:560px; margin:auto; }
+    h1 { font-size:20px; }
+    label { display:block; font-size:13px; color:#8d96a3; margin:14px 0 4px; }
+    input { width:100%; box-sizing:border-box; padding:10px; border-radius:10px; border:1px solid #2b313b; background:#1e232b; color:#eee; font-size:15px; }
+    button { padding:11px 16px; border-radius:10px; border:0; background:#6f8dff; color:#fff; font-weight:600; font-size:15px; margin-top:12px; }
+    .file { padding:12px; border-bottom:1px solid #2b313b; cursor:pointer; }
+    .file small { color:#8d96a3; display:block; }
+    pre { white-space:pre-wrap; background:#1e232b; border-radius:10px; padding:12px; font-size:13px; line-height:1.5; }
+    .verdict { font-size:16px; font-weight:700; margin-top:12px; padding:12px; border-radius:10px; }
+    .pass { background:#17331f; color:#7be08f; } .fail { background:#3a1b1b; color:#ff8a8a; } .warn { background:#3a331b; color:#ffd479; }
+  </style>
+</head>
+<body>
+  <h1>Google Drive test</h1>
+  <p style="color:#8d96a3;font-size:14px">Checks whether songs in a Drive folder can be played AND passed on to a friend. Your key stays in this browser only.</p>
+
+  <label>Google API key</label>
+  <input id="key" placeholder="AIza...">
+  <label>Drive folder ID (the last part of the folder's web address)</label>
+  <input id="folder" placeholder="1AbCdEf...">
+  <button id="list">List folder</button>
+
+  <div id="files"></div>
+  <div id="verdict"></div>
+  <pre id="log">Waiting...</pre>
+  <audio id="a" playsinline></audio>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const audio = $('a');
+audio.crossOrigin = 'anonymous';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const log = (t) => { $('log').textContent += '\n' + t; };
+const clearLog = () => { $('log').textContent = ''; $('verdict').textContent = ''; $('verdict').className = ''; };
+const verdict = (text, cls) => { $('verdict').textContent = text; $('verdict').className = 'verdict ' + cls; };
+
+try { $('key').value = localStorage.getItem('dt-key') || ''; $('folder').value = localStorage.getItem('dt-folder') || ''; } catch (e) {}
+const key = () => $('key').value.trim();
+const folder = () => $('folder').value.trim();
+const save = () => { try { localStorage.setItem('dt-key', key()); localStorage.setItem('dt-folder', folder()); } catch (e) {} };
+
+$('list').onclick = async () => {
+  save(); clearLog(); $('files').innerHTML = '';
+  if (!key() || !folder()) return log('Fill in both boxes first.');
+  const q = "'" + folder() + "' in parents and trashed=false";
+  const url = 'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(q) +
+    '&fields=' + encodeURIComponent('files(id,name,mimeType,size)') + '&pageSize=100&key=' + encodeURIComponent(key());
+  log('Step 1: asking Google for the folder list...');
+  try {
+    const r = await fetch(url);
+    const j = await r.json();
+    if (!r.ok) {
+      log('FAILED. HTTP ' + r.status + ': ' + ((j.error && j.error.message) || 'unknown error'));
+      return verdict('Step 1 failed: could not list the folder', 'fail');
+    }
+    const files = (j.files || []).filter((f) => /^audio\//.test(f.mimeType) || /\.(mp3|m4a|aac|wav|flac|ogg)$/i.test(f.name));
+    log('OK. Found ' + files.length + ' audio file(s).');
+    if (!files.length) return verdict('Folder is readable but has no audio files', 'warn');
+    files.forEach((f) => {
+      const d = document.createElement('div');
+      d.className = 'file';
+      const mb = f.size ? (f.size / 1048576).toFixed(1) + ' MB' : '';
+      d.innerHTML = '';
+      const n = document.createElement('div'); n.textContent = f.name;
+      const s = document.createElement('small'); s.textContent = mb + '  (tap to test)';
+      d.append(n, s);
+      d.onclick = () => testFile(f);
+      $('files').appendChild(d);
+    });
+    log('Now tap a song below to run the real test.');
+  } catch (e) {
+    log('FAILED: ' + e.message + ' (blocked by the browser, or no internet)');
+    verdict('Step 1 failed: could not reach Google', 'fail');
+  }
+};
+
+// Same audio path the real app uses: song -> Web Audio -> (your ears) + (stream to friend)
+let actx = null, analyser = null;
+function setupGraph() {
+  if (actx) return;
+  actx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = actx.createMediaElementSource(audio);
+  analyser = actx.createAnalyser();
+  analyser.fftSize = 1024;
+  const dest = actx.createMediaStreamDestination();   // what would go to your friend
+  src.connect(analyser);
+  analyser.connect(actx.destination);
+  src.connect(dest);
+}
+
+async function diagnose(url) {
+  try {
+    const r = await fetch(url, { headers: { Range: 'bytes=0-1' } });
+    if (r.ok || r.status === 206) return 'Direct request worked (HTTP ' + r.status + '), but the player still failed.';
+    let msg = '';
+    try { msg = (await r.json()).error.message; } catch (e) {}
+    return 'Google answered HTTP ' + r.status + (msg ? ': ' + msg : '');
+  } catch (e) {
+    return 'The browser blocked the request (CORS), so audio cannot be passed on.';
+  }
+}
+
+async function testFile(f) {
+  save(); clearLog();
+  const url = 'https://www.googleapis.com/drive/v3/files/' + f.id + '?alt=media&key=' + encodeURIComponent(key());
+  log('Step 2: playing "' + f.name + '"...');
+  let errored = false;
+  setupGraph();
+  actx.resume();
+  audio.onerror = () => { errored = true; };
+  audio.src = url;
+  audio.play().catch((e) => log('play() was refused: ' + e.name));
+
+  const buf = new Uint8Array(analyser.fftSize);
+  let peak = 0;
+  const start = Date.now();
+  while (Date.now() - start < 8000 && !errored) {
+    analyser.getByteTimeDomainData(buf);
+    for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i] - 128));
+    await sleep(150);
+  }
+  const t = audio.currentTime;
+  log('Played for ' + t.toFixed(1) + ' s. Loudest level the app could read: ' + peak + ' (0 = silence).');
+
+  if (errored) {
+    const why = await diagnose(url);
+    log(why);
+    return verdict('FAIL: this song would not play from Drive', 'fail');
+  }
+  if (t > 1 && peak >= 2) return verdict('PASS: it plays AND the sound can be passed on to a friend', 'pass');
+  if (t > 1) {
+    log('The song moved forward but the app only saw silence. Either Google blocks passing the sound on, or this song starts with silence. Try a different song to be sure.');
+    return verdict('PROBABLY FAIL: plays for you, but a friend would hear nothing', 'fail');
+  }
+  log('It never really started within 8 seconds.');
+  verdict('STUCK: did not start (slow connection, or throttled by Google)', 'warn');
+}
+</script>
+</body>
+</html>

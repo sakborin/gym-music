@@ -48,7 +48,16 @@
     <div class="mx-2 mb-4 rounded-2xl border border-[#2b313b] bg-[#1e232b] p-4">
       <div class="mb-3 flex items-center justify-between">
         <p class="text-sm font-semibold">My Drive music</p>
-        <button id="refresh" class="rounded-full border border-[#2b313b] px-3 py-1.5 text-xs text-[#8d96a3]">Refresh</button>
+        <div class="flex gap-2">
+          <button id="shuffleall" class="rounded-full bg-[#6f8dff] px-3 py-1.5 text-xs font-semibold text-white">Shuffle all</button>
+          <button id="refresh" class="rounded-full border border-[#2b313b] px-3 py-1.5 text-xs text-[#8d96a3]">Refresh</button>
+        </div>
+      </div>
+      <div id="crumb" class="hidden">
+        <div class="mb-2 flex items-center gap-3 text-xs text-[#8d96a3]">
+          <button id="back" class="rounded-full border border-[#2b313b] px-3 py-1.5">Back</button>
+          <span id="path" class="truncate"></span>
+        </div>
       </div>
       <input id="q" placeholder="Filter by name"
         class="w-full rounded-xl border border-[#2b313b] bg-[#15181e] px-3 py-2.5 text-sm outline-none focus:border-[#6f8dff]">

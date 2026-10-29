@@ -1,6 +1,6 @@
 // ===== YOUR SETTINGS =====
-// Paste your NEW Google key between the quotes. The folder ID is already filled in.
-const DRIVE_KEY = 'AIzaSyDkbcBEC6VGpx_AVZ5mA6rTjueXeYly4r4';
+// Paste your Google key between the quotes. The folder ID is already filled in.
+const DRIVE_KEY = 'PASTE_YOUR_NEW_KEY_HERE';
 const DRIVE_FOLDER = '1TZeXtpfhbAp4cyWqEcu2-l__sW4phEIp';
 // =========================
 
@@ -45,6 +45,7 @@ const ICON = {
   pause: '<svg viewBox="0 0 24 24" class="size-7" fill="currentColor"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>',
   loop: '<svg viewBox="0 0 24 24" class="size-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>',
   loopOne: '<svg viewBox="0 0 24 24" class="size-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/><path d="M11 10h1v4"/></svg>',
+  folder: '<svg viewBox="0 0 24 24" class="size-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>',
   close: '<svg viewBox="0 0 24 24" class="size-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>'
 };
 
@@ -55,7 +56,9 @@ let guests = new Map();            // host only: everyone listening right now
 let sessionCode = '', lastEvent = '', pingTimer = null, watchTimer = null;
 let leftByMe = false, hostEnded = false;
 let gainNode = null, hostVol = 1;   // host's own volume (does not change what friends hear)
-let results = [], mode = 'local', driveIndex = -1, hasTrack = false;   // Drive music state (mode is 'local' or 'drive')
+let results = [], shownFolders = [];            // what the Drive list is showing right now
+let queue = [], queueIndex = -1;                // what is actually playing from Drive
+let mode = 'local', hasTrack = false;           // mode is 'local' (phone files) or 'drive'
 let nowLabel = '';   // what is playing, sent to friends who join late
 
 // ---------- Storage (stays on this phone) ----------
@@ -115,12 +118,12 @@ async function refresh() {
 function playLocal(i) {
   if (!songs[i]) return;
   index = i;
-  mode = 'local'; driveIndex = -1; hasTrack = true;
+  mode = 'local'; hasTrack = true;
   renderResults();
   if (player.dataset.url) URL.revokeObjectURL(player.dataset.url);
   player.dataset.url = URL.createObjectURL(songs[i].blob);
   player.src = player.dataset.url;
-  setupHostAudio();
+  if (ctx) ctx.resume();
   player.play();
   nowLabel = title(songs[i]);
   now.textContent = nowLabel;
@@ -128,26 +131,51 @@ function playLocal(i) {
   if ('mediaSession' in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: title(songs[i]), artist: 'Gym Music' });
   refresh();
 }
+
+// Smart shuffle: every song plays once, in random order, before any song repeats
+const bags = { local: [], drive: [] };
+function shufflePick(key, len, cur) {
+  if (len <= 1) return 0;
+  let bag = bags[key].filter((i) => i < len && i !== cur);
+  if (!bag.length) {
+    bag = Array.from({ length: len }, (_, i) => i);
+    for (let i = bag.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [bag[i], bag[j]] = [bag[j], bag[i]];
+    }
+    // never start a new round with the song that just played
+    if (bag[bag.length - 1] === cur) [bag[0], bag[bag.length - 1]] = [bag[bag.length - 1], bag[0]];
+  }
+  const pick = bag.pop();
+  bags[key] = bag;
+  return pick;
+}
+
 function next() {
   if (mode === 'drive') {
-    if (!results.length) return;
-    return playDrive(shuffle ? Math.floor(Math.random() * results.length) : (driveIndex + 1) % results.length);
+    if (!queue.length) return;
+    return playQueue(shuffle ? shufflePick('drive', queue.length, queueIndex) : (queueIndex + 1) % queue.length);
   }
   if (!songs.length) return;
-  playLocal(shuffle ? Math.floor(Math.random() * songs.length) : (index + 1) % songs.length);
+  playLocal(shuffle ? shufflePick('local', songs.length, index) : (index + 1) % songs.length);
 }
 function prev() {
   if (player.currentTime > 3) { player.currentTime = 0; return; }
   if (mode === 'drive') {
-    if (!results.length) return;
-    return playDrive((driveIndex - 1 + results.length) % results.length);
+    if (!queue.length) return;
+    return playQueue((queueIndex - 1 + queue.length) % queue.length);
   }
   if (!songs.length) return;
   playLocal((index - 1 + songs.length) % songs.length);
 }
 function toggle() {
-  if (!hasTrack) return playLocal(0);
-  setupHostAudio();
+  if (!hasTrack) {
+    if (results.length && (shuffle || !songs.length)) {
+      return playFromView(shuffle ? Math.floor(Math.random() * results.length) : 0);
+    }
+    return playLocal(0);
+  }
+  if (ctx) ctx.resume();
   player.paused ? player.play() : player.pause();
 }
 const fmt = (s) => isFinite(s) ? Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0') : '0:00';
@@ -161,10 +189,10 @@ player.ontimeupdate = () => {
 };
 player.onended = () => {
   if (!hasTrack) return;
-  if (mode === 'drive' && driveIndex < 0) return;
+  if (mode === 'drive' && queueIndex < 0) return;
   if (mode === 'local' && index < 0) return;
   if (loopMode === 2) { player.currentTime = 0; player.play(); return; }
-  const last = mode === 'drive' ? driveIndex >= results.length - 1 : index >= songs.length - 1;
+  const last = mode === 'drive' ? queueIndex >= queue.length - 1 : index >= songs.length - 1;
   if (loopMode === 1 || shuffle || !last) next();
 };
 player.onplaying = () => { if (mode === 'drive') setOn('Playing from Google Drive.'); };
@@ -206,12 +234,12 @@ function saveVol(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 // Host volume: only changes what YOU hear, friends are not affected
 $('vol').value = loadVol('gym-vol');
 hostVol = curve($('vol').value);
+player.volume = hostVol;   // before a session starts (iPhones ignore this; use the volume buttons)
 $('volval').textContent = $('vol').value + '%';
 $('vol').oninput = () => {
   hostVol = curve($('vol').value);
   if (gainNode) gainNode.gain.value = hostVol;
-  $('volval').textContent = $('vol').value + '%';
-  saveVol('gym-vol', $('vol').value);
+  else player.volume = hostVol;
 };
 
 // Guest volume: works on laptops and Android. iPhones ignore it (use the volume buttons there).
@@ -232,25 +260,75 @@ if ('mediaSession' in navigator) {
   navigator.mediaSession.setActionHandler('previoustrack', prev);
 }
 
-// ---------- Drive music (your own Google Drive folder) ----------
+// ---------- Drive music (your own Google Drive folder, with subfolders) ----------
 const setOn = (t) => { $('onstatus').textContent = t; };
-let driveAll = [];       // every song in the Drive folder
-let currentUrl = '';     // the Drive song playing right now
+const FOLDER_TYPE = 'application/vnd.google-apps.folder';
+let driveAll = [];                 // songs in the folder you are looking at
+let subfolders = [];               // folders inside the folder you are looking at
+let folderStack = [{ id: DRIVE_FOLDER, name: 'My Drive music' }];   // where you are
+let currentUrl = '';               // the Drive song playing right now
+const folderCache = new Map();     // so opening a folder twice does not ask Google twice
 
 const driveUrl = (id) => 'https://www.googleapis.com/drive/v3/files/' + id + '?alt=media&key=' + encodeURIComponent(DRIVE_KEY);
+
+// Ask Google what is inside one folder (handles folders with more than 1000 items)
+async function getFolder(id) {
+  if (folderCache.has(id)) return folderCache.get(id);
+  const out = { folders: [], songs: [] };
+  let token = '';
+  do {
+    const q = "'" + id + "' in parents and trashed=false";
+    const url = 'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(q) +
+      '&fields=' + encodeURIComponent('nextPageToken,files(id,name,mimeType)') +
+      '&orderBy=name&pageSize=1000&key=' + encodeURIComponent(DRIVE_KEY) +
+      (token ? '&pageToken=' + encodeURIComponent(token) : '');
+    const r = await fetch(url);
+    const j = await r.json();
+    if (!r.ok) throw new Error((j.error && j.error.message) || 'HTTP ' + r.status);
+    (j.files || []).forEach((f) => {
+      if (f.mimeType === FOLDER_TYPE) out.folders.push({ id: f.id, name: f.name });
+      else if (/^audio\//.test(f.mimeType) || /\.(mp3|m4a|aac|wav|flac|ogg)$/i.test(f.name)) {
+        out.songs.push({ title: f.name.replace(/\.[^.]+$/, ''), artist: '', url: driveUrl(f.id) });
+      }
+    });
+    token = j.nextPageToken || '';
+  } while (token);
+  folderCache.set(id, out);
+  return out;
+}
 
 function renderResults() {
   const ul = $('results');
   ul.innerHTML = '';
+  $('crumb').classList.toggle('hidden', folderStack.length === 1);
+  $('path').textContent = folderStack.slice(1).map((f) => f.name).join(' / ');
+
+  shownFolders.forEach((f) => {
+    const li = document.createElement('li');
+    li.className = 'flex cursor-pointer items-center gap-3 rounded-xl border-b border-[#2b313b] px-2 py-3';
+    const icon = document.createElement('span');
+    icon.className = 'text-[#8d96a3]';
+    icon.innerHTML = ICON.folder;
+    const name = document.createElement('span');
+    name.className = 'flex-1 truncate text-sm';
+    name.textContent = f.name;
+    const arrow = document.createElement('span');
+    arrow.className = 'text-[#8d96a3]';
+    arrow.textContent = '›';
+    li.append(icon, name, arrow);
+    li.onclick = () => { folderStack.push(f); $('q').value = ''; openFolder(); };
+    ul.appendChild(li);
+  });
+
   results.forEach((t, i) => {
-    const active = mode === 'drive' && i === driveIndex;
+    const active = mode === 'drive' && t.url === currentUrl;
     const li = document.createElement('li');
     li.className = 'cursor-pointer rounded-xl border-b border-[#2b313b] px-2 py-3' + (active ? ' bg-[#15181e]' : '');
     const a = document.createElement('div');
     a.className = 'truncate text-sm' + (active ? ' text-[#6f8dff]' : '');
     a.textContent = t.title;
     li.append(a);
-    li.onclick = () => playDrive(i);
+    li.onclick = () => playFromView(i);
     ul.appendChild(li);
   });
 }
@@ -260,7 +338,7 @@ function startUrl(url, label) {
   currentUrl = url;
   player.src = url;
   hasTrack = true;
-  setupHostAudio();
+  if (ctx) ctx.resume();
   player.play().catch(() => {});
   nowLabel = label;
   now.textContent = label;
@@ -268,39 +346,75 @@ function startUrl(url, label) {
   if ('mediaSession' in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: label, artist: 'Gym Music' });
 }
 
-function playDrive(i) {
-  const t = results[i];
+// Play song number i from the queue (the list that is actually playing)
+function playQueue(i) {
+  const t = queue[i];
   if (!t) return;
-  mode = 'drive'; driveIndex = i; index = -1;
+  mode = 'drive'; queueIndex = i; index = -1;
   setOn('Loading...');
   startUrl(t.url, t.title);
   renderResults();
   refresh();
 }
+// You tapped a song in the list you are looking at: that list becomes the queue
+function playFromView(i) {
+  queue = results.slice();
+  bags.drive = [];
+  playQueue(i);
+}
 
 function applyFilter() {
   const q = $('q').value.trim().toLowerCase();
   results = driveAll.filter((t) => t.title.toLowerCase().includes(q));
-  driveIndex = mode === 'drive' ? results.findIndex((t) => t.url === currentUrl) : -1;
+  shownFolders = subfolders.filter((f) => f.name.toLowerCase().includes(q));
   renderResults();
 }
 
-async function loadDrive() {
+async function openFolder() {
   if (DRIVE_KEY.startsWith('PASTE')) return setOn('Add your Google key in app.js first (see the instructions).');
-  setOn('Loading your Drive folder...');
+  const here = folderStack[folderStack.length - 1];
+  setOn('Loading...');
   try {
-    const q = "'" + DRIVE_FOLDER + "' in parents and trashed=false";
-    const url = 'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(q) +
-      '&fields=' + encodeURIComponent('files(id,name,mimeType,size)') +
-      '&orderBy=name&pageSize=1000&key=' + encodeURIComponent(DRIVE_KEY);
-    const r = await fetch(url);
-    const j = await r.json();
-    if (!r.ok) throw new Error((j.error && j.error.message) || 'HTTP ' + r.status);
-    driveAll = (j.files || [])
-      .filter((f) => /^audio\//.test(f.mimeType) || /\.(mp3|m4a|aac|wav|flac|ogg)$/i.test(f.name))
-      .map((f) => ({ title: f.name.replace(/\.[^.]+$/, ''), artist: '', url: driveUrl(f.id) }));
+    const data = await getFolder(here.id);
+    driveAll = data.songs;
+    subfolders = data.folders;
     applyFilter();
-    setOn(driveAll.length ? driveAll.length + ' song(s) in your Drive folder.' : 'The folder is empty. Add songs to it in Google Drive, then tap Refresh.');
+    const parts = [];
+    if (driveAll.length) parts.push(driveAll.length + ' song(s)');
+    if (subfolders.length) parts.push(subfolders.length + ' folder(s)');
+    setOn(parts.length ? parts.join(', ') + (folderStack.length === 1 ? ' in your Drive folder.' : ' in ' + here.name + '.')
+      : 'This folder is empty. Add songs in Google Drive, then tap Refresh.');
+  } catch (e) {
+    setOn("Couldn't load Drive: " + e.message);
+  }
+}
+
+function loadDrive() { folderCache.clear(); openFolder(); }
+
+// Shuffle all: look through every folder, then play random songs from all of them
+async function shuffleAll() {
+  if (DRIVE_KEY.startsWith('PASTE')) return setOn('Add your Google key in app.js first.');
+  if (ctx) ctx.resume();
+  if (!hasTrack) unlock(player);   // keeps iPhone happy: the tap must unlock sound before we wait on the network
+  setOn('Looking through all your folders...');
+  try {
+    const all = [];
+    const todo = [DRIVE_FOLDER], seen = new Set();
+    while (todo.length && seen.size < 60) {
+      const id = todo.shift();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const data = await getFolder(id);
+      all.push(...data.songs);
+      data.folders.forEach((f) => todo.push(f.id));
+    }
+    if (!all.length) return setOn('No songs found in any folder.');
+    shuffle = true;
+    setActive($('shuffle'), true);
+    queue = all;
+    bags.drive = [];
+    playQueue(Math.floor(Math.random() * all.length));
+    setOn('Shuffling ' + all.length + ' songs from all your folders.');
   } catch (e) {
     setOn("Couldn't load Drive: " + e.message);
   }
@@ -308,6 +422,10 @@ async function loadDrive() {
 
 $('q').oninput = applyFilter;
 $('refresh').onclick = loadDrive;
+$('shuffleall').onclick = shuffleAll;
+$('back').onclick = () => {
+  if (folderStack.length > 1) { folderStack.pop(); $('q').value = ''; openFolder(); }
+};
 
 // ---------- Listen together ----------
 const setStatus = (t) => { statusEl.textContent = t; };
@@ -381,6 +499,7 @@ function setupHostAudio() {
   if (ctx) { ctx.resume(); return; }
   const AC = window.AudioContext || window.webkitAudioContext;
   ctx = new AC();
+  player.volume = 1;   // from now on the slider works through the audio engine
   const source = ctx.createMediaElementSource(player);
   delayNode = ctx.createDelay(1.0);
   delayNode.delayTime.value = delayMs / 1000;

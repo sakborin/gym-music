@@ -1,6 +1,6 @@
 // ===== YOUR SETTINGS =====
 // Paste your Google key between the quotes. The folder ID is already filled in.
-const DRIVE_KEY = 'PASTE_YOUR_NEW_KEY_HERE';
+const DRIVE_KEY = 'AIzaSyA8OOSOqEJdNzd7Mfjy9BYJGUbdnjW3h7o';
 const DRIVE_FOLDER = '1TZeXtpfhbAp4cyWqEcu2-l__sW4phEIp';
 // =========================
 
